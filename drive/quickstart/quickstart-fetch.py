@@ -32,12 +32,12 @@ SCOPES1 = ['https://www.googleapis.com/auth/drive.metadata.readonly',
            'https://www.googleapis.com/auth/drive']
 SCOPES2 = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
-NOME_PASTA_DESAFIO = 'Desafio 7'
+NOME_PASTA_DESAFIO = 'Desafio 8'
 DEST_DIR = './Files'
 
 # The range of target spreadsheet.
 # SAMPLE_SPREADSHEET_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
-SAMPLE_RANGE_NAME = 'A2:W56'
+SAMPLE_RANGE_NAME = 'A2:W36'
 
 
 def get_sheet(drive_service, service, spreadsheet_id):
