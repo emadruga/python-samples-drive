@@ -18,7 +18,9 @@ from __future__ import print_function
 import os.path
 import io
 import re
+import logging
 
+from tqdm import tqdm
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -31,8 +33,8 @@ SCOPES1 = ['https://www.googleapis.com/auth/drive.metadata.readonly',
            'https://www.googleapis.com/auth/drive']
 SCOPES2 = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
-NOME_PASTA_DESAFIO = 'Desafio 8'
-DEST_DIR = './Files'
+NOME_PASTA_DESAFIO = 'Desafio 5'
+DEST_DIR = 'Files/E05/Files'
 
 # The range of target spreadsheet.
 # SAMPLE_SPREADSHEET_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
@@ -41,11 +43,12 @@ SAMPLE_RANGE_NAME = 'A2:W36'
 
 def download_file(drive_service, file_id, name, filename):
     # download a file as defined by the drive service file id
+    percentage_file_received = 0
     try:
         request = drive_service.files().get_media(fileId=file_id)
 
         if not os.path.isdir(f'{DEST_DIR}/{name}'):
-            print(f'Creating folder: {DEST_DIR}/{name}...')
+            logging.debug(f'Creating folder: {DEST_DIR}/{name}...')
             os.makedirs(f'{DEST_DIR}/{name}')
 
         fh = io.FileIO(f'{DEST_DIR}/{name}/{filename}', 'wb')  # this can be used to write to disk
@@ -54,21 +57,24 @@ def download_file(drive_service, file_id, name, filename):
         done = False
         while done is False:
             status, done = downloader.next_chunk()
-            print("Download %d%%." % int(status.progress() * 100))
+            percentage_file_received = int(status.progress() * 100)
+            logging.debug("Download %d%%." % percentage_file_received)
 
     except HttpError as err:
-        print(f'File download failure: {err}')
-        raise
+        raise HttpError(f'File download failure: {filename} ({err})')
+
+    return percentage_file_received
 
 
 def process_row(drive_service, row):
     # Print columns, which correspond to indices 0 and 4.
+    perc_file_read = 0
     timestamp = row[0]
     name = row[2]
     file_url = row[-1]
     if "https://" not in file_url:
         raise ValueError(f'Invalid URL for submission {name}: {file_url}')
-    print('%s, %s' % (name, file_url))
+    logging.debug('%s, %s' % (name, file_url))
     file_id = re.search(r".*id=(.*)$", file_url).group(1)
     try:
         # https://developers.google.com/drive/api/v3/reference/files
@@ -76,13 +82,15 @@ def process_row(drive_service, row):
         # https://developers.google.com/drive/api/v3/reference/replies/get
         file = drive_service.files().get(fileId=file_id,
                                          fields='id,name,createdTime,size').execute()
-    except HttpError as err:
-        print(f'File metadata failure: {err}')
-        raise
 
-    print(F'Found file: {file.get("name")}, {file.get("size")} bytes,{file.get("id")}, {timestamp}')
-    filename = file.get("name")
-    download_file(drive_service, file_id, name, filename)
+        logging.debug(F'Found file: {file.get("name")}, {file.get("size")} bytes,{file.get("id")}, {timestamp}')
+        filename = file.get("name")
+
+        perc_file_read = download_file(drive_service, file_id, name, filename)
+    except HttpError as err:
+        raise HttpError(f'File error: {err}')
+
+    return perc_file_read
 
 
 def compute_range(rows, cols):
@@ -112,6 +120,7 @@ def process_sheet_rows(drive_service, sheet_service, spreadsheet_id):
     """Shows basic usage of the Sheets API.
     Prints values from a sample spreadsheet.
     """
+    num_submissions_ok = 0
     try:
         sss = sheet_service.spreadsheets()
         # https://developers.google.com/sheets/api/samples/sheet
@@ -120,21 +129,27 @@ def process_sheet_rows(drive_service, sheet_service, spreadsheet_id):
         sheet = props.get('sheets', {})[0]
         rows = sheet['properties']['gridProperties']['rowCount']
         cols = sheet['properties']['gridProperties']['columnCount']
-        print(f'Sheet Shape {rows}:{cols}')
+        logging.debug(f'Given Shape {rows}:{cols}')
         srange = compute_range(rows, cols)
+        logging.debug(f'Presumed Shape {srange}')
         result = sss.values().get(spreadsheetId=spreadsheet_id, range=srange).execute()
         rows = result.get('values', [])
 
         if not rows:
-            print('No data found.')
+            logging.debug('No data found.')
             return
 
-        print(f'Aluno, File URL ({len(rows)}):')
-        for submission in rows:
-            process_row(drive_service, submission)
+        logging.debug(f'#Possible submissions: {len(rows)}')
+        for row in tqdm(range(len(rows)), desc="Downloading..."):
+            submission = rows[row]
+            percentage_file_received = process_row(drive_service, submission)
+            if percentage_file_received >= 100:
+                num_submissions_ok += 1
 
     except HttpError as err:
-        print(err)
+        logging.error(err)
+
+    return num_submissions_ok
 
 
 def main():
@@ -162,7 +177,9 @@ def main():
     try:
         drive_service = build('drive', 'v3', credentials=creds)
         sheet_service = build('sheets', 'v4', credentials=creds)
+        num_submissions_processed = 0
 
+        logging.info(f'Looking into Google Drive folder "{NOME_PASTA_DESAFIO}"...')
         # Call the Drive v3 API
         folders_from_name = drive_service.files().list(
             q=f"mimeType = 'application/vnd.google-apps.folder' and name = '{NOME_PASTA_DESAFIO}'",
@@ -180,20 +197,29 @@ def main():
         files = files_given_folder.get('files', [])
 
         if not files:
-            print('No files found.')
+            logging.info('No files found.')
             return
 
         for file in files:
             # Now we process the Google Sheet file inside the chosen folder
             if "(respostas)" in file['name']:
-                print(u'{0} ({1})'.format(file['name'], file['id']))
-                process_sheet_rows(drive_service, sheet_service, file['id'])
+                logging.info(f'Sheet file to process: {file["name"]}')
+                logging.info(f'Saving submissions to: {DEST_DIR}')
+                num_submissions_processed = process_sheet_rows(drive_service, sheet_service, file['id'])
+                logging.info(f'#Downloads Ok: {num_submissions_processed}')
+
+        if num_submissions_processed == 0:
+            logging.info(f'No submissions found: Google Sheet file in the right folder?')
 
     except HttpError as error:
         # TODO(developer) - Handle errors from sheet API.
-        print(f'An error occurred: {error}')
+        logging.error(f'An error occurred: {error}')
 
 
 if __name__ == '__main__':
+
+    logging.basicConfig(format='%(asctime)s - %(message)s',
+                        datefmt='%d-%b-%y %H:%M:%S',
+                        level=logging.INFO)
     main()
 # [END drive_quickstart]
