@@ -33,8 +33,8 @@ SCOPES1 = ['https://www.googleapis.com/auth/drive.metadata.readonly',
            'https://www.googleapis.com/auth/drive']
 SCOPES2 = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 
-NOME_PASTA_DESAFIO = 'Desafio 5'
-DEST_DIR = 'Files/E05/Files'
+NOME_PASTA_DESAFIO = '2023-1 :: Desafio 1'
+DEST_DIR = 'Challenges/E01'
 
 # The range of target spreadsheet.
 # SAMPLE_SPREADSHEET_ID = '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'
@@ -82,18 +82,23 @@ def process_row(drive_service, row):
         # https://developers.google.com/drive/api/v3/reference/replies/get
         file = drive_service.files().get(fileId=file_id,
                                          fields='id,name,createdTime,size').execute()
-
-        logging.debug(F'Found file: {file.get("name")}, {file.get("size")} bytes,{file.get("id")}, {timestamp}')
         filename = file.get("name")
+        file_size = int(file.get("size"))
+        logging.debug(F'Found file: {file.get("name")}, {file_size} bytes,{file.get("id")}, {timestamp}')
+
+        if file_size == 0:
+            raise EOFError(f'File {filename}: empty...')
 
         perc_file_read = download_file(drive_service, file_id, name, filename)
     except HttpError as err:
         raise HttpError(f'File error: {err}')
+    except EOFError as err:
+        raise EOFError(err)
 
     return perc_file_read
 
 
-def compute_range(rows, cols):
+def compute_range(rows, cols, forced_rows):
     # our sheet data always starts at cell 'A2'
     # need to come up with the last column and row
     sheet_range = ''
@@ -111,12 +116,12 @@ def compute_range(rows, cols):
     end_column_letter = all_columns[idx-6]
 
     # It appears that Google Sheets adds 100 to the last row that is non-empty
-    end_row_num = rows - 100
+    end_row_num = max(rows - 100, forced_rows)
     sheet_range = f'A2:{end_column_letter}{end_row_num}'
     return sheet_range
 
 
-def process_sheet_rows(drive_service, sheet_service, spreadsheet_id):
+def process_sheet_rows(drive_service, sheet_service, spreadsheet_id, forced_rows):
     """Shows basic usage of the Sheets API.
     Prints values from a sample spreadsheet.
     """
@@ -130,8 +135,8 @@ def process_sheet_rows(drive_service, sheet_service, spreadsheet_id):
         rows = sheet['properties']['gridProperties']['rowCount']
         cols = sheet['properties']['gridProperties']['columnCount']
         logging.debug(f'Given Shape {rows}:{cols}')
-        srange = compute_range(rows, cols)
-        logging.debug(f'Presumed Shape {srange}')
+        srange = compute_range(rows, cols, forced_rows)
+        logging.info(f'Presumed Shape {srange}')
         result = sss.values().get(spreadsheetId=spreadsheet_id, range=srange).execute()
         rows = result.get('values', [])
 
@@ -139,20 +144,38 @@ def process_sheet_rows(drive_service, sheet_service, spreadsheet_id):
             logging.debug('No data found.')
             return
 
+        row_exceptions = []
         logging.debug(f'#Possible submissions: {len(rows)}')
         for row in tqdm(range(len(rows)), desc="Downloading..."):
+            percentage_file_received = 0
             submission = rows[row]
-            percentage_file_received = process_row(drive_service, submission)
-            if percentage_file_received >= 100:
-                num_submissions_ok += 1
+            author = submission[2]
+            max_attemps = 5
+            while percentage_file_received < 100 and max_attemps > 0:
+                try:
+                    percentage_file_received = process_row(drive_service, submission)
+                    if percentage_file_received >= 100:
+                        num_submissions_ok += 1
+                    else:
+                        max_attemps -= 1
+                    if max_attemps == 0:
+                        logging.warning(f'File {author}: too long. Giving up...')
+                except EOFError as err:
+                    row_exceptions.append((author, err))
+                    break
 
     except HttpError as err:
         logging.error(err)
 
+    logging.info('Files to watch:')
+    for exc in row_exceptions:
+        author = exc[0]
+        reason_exception = exc[1]
+        logging.info(f'{author}: {reason_exception}')
     return num_submissions_ok
 
 
-def main():
+def main(forced_rows):
     """Shows basic usage of the Drive v3 API.
     Prints the names and ids of the first 10 files the user has access to.
     """
@@ -205,7 +228,7 @@ def main():
             if "(respostas)" in file['name']:
                 logging.info(f'Sheet file to process: {file["name"]}')
                 logging.info(f'Saving submissions to: {DEST_DIR}')
-                num_submissions_processed = process_sheet_rows(drive_service, sheet_service, file['id'])
+                num_submissions_processed = process_sheet_rows(drive_service, sheet_service, file['id'], forced_rows)
                 logging.info(f'#Downloads Ok: {num_submissions_processed}')
 
         if num_submissions_processed == 0:
@@ -218,8 +241,10 @@ def main():
 
 if __name__ == '__main__':
 
+    # if rows were manually added, for authors with very good reasons...
+    forced_rows = 60
     logging.basicConfig(format='%(asctime)s - %(message)s',
                         datefmt='%d-%b-%y %H:%M:%S',
                         level=logging.INFO)
-    main()
+    main(forced_rows)
 # [END drive_quickstart]
